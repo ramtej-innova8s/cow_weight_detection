@@ -1,40 +1,53 @@
-import os
-from flask import Flask, render_template, request, redirect, url_for, send_from_directory
-from weight_detection import process_video  # Import the process_video function
+import streamlit as st
+import torch
+import cv2
+from pathlib import Path
 
-app = Flask(__name__)
+# Load the YOLOv5 model
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
 
-# Ensure the uploads and outputs directories exist
-os.makedirs('uploads', exist_ok=True)
-os.makedirs('outputs', exist_ok=True)
+# Function to estimate cow weight
+def estimate_weight(bbox):
+    xmin, ymin, xmax, ymax = bbox
+    area = (xmax - xmin) * (ymax - ymin)
+    weight = area * 0.001
+    return weight
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+st.title('Cow Weight Estimation')
+video_file = st.file_uploader("Upload a video", type=["mp4"])
 
-@app.route('/upload', methods=['POST'])
-def upload():
-    if 'file' not in request.files:
-        return redirect(url_for('index'))
-    
-    file = request.files['file']
-    
-    if file.filename == '':
-        return redirect(url_for('index'))
-    
-    if file:
-        filepath = os.path.join('uploads', file.filename)
-        file.save(filepath)
-        
-        # Process video
-        output_path = os.path.join('outputs', f"processed_{file.filename}")
-        processed_video = process_video(filepath, output_path)
-        
-        return redirect(url_for('download', filename=os.path.basename(processed_video)))
+if video_file is not None:
+    st.video(video_file)
+    video_path = './uploaded_video.mp4'
+    with open(video_path, 'wb') as f:
+        f.write(video_file.getbuffer())
 
-@app.route('/download/<filename>')
-def download(filename):
-    return send_from_directory('outputs', filename)
+    cap = cv2.VideoCapture(video_path)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    output_path = './output_video.mp4'
+    out = cv2.VideoWriter(output_path, fourcc, int(cap.get(cv2.CAP_PROP_FPS)),
+                          (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))))
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        results = model(frame)
+        detections = results.xyxy[0]
+
+        for *box, conf, cls in detections:
+            if model.names[int(cls)] == 'cow' and conf > 0.55:
+                weight = estimate_weight(box)
+                label = f'{model.names[int(cls)]} {conf:.2f} | {weight:.2f} kg'
+                cv2.rectangle(frame, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 255, 0), 2)
+                cv2.putText(frame, label, (int(box[0]), int(box[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+        out.write(frame)
+
+    cap.release()
+    out.release()
+
+    st.success("Processing completed! Download the output video below.")
+    with open(output_path, 'rb') as f:
+        st.download_button('Download Output Video', f, file_name='output_video.mp4')
